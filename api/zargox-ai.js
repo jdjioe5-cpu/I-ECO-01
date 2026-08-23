@@ -157,6 +157,7 @@ async function getZargoxAIResponse(message, history = []) {
       body: JSON.stringify({
         model: DEFAULT_MODEL,
         messages,
+        thinking: { type: 'disabled' },
         stream: false
       }),
       signal: controller.signal
