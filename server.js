@@ -49,6 +49,13 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/urbanlab'
 .catch(err => { logger.error('❌ MongoDB errore:', err); console.error('❌ MongoDB errore:', err); });
 
 // ---- ROTTE ESCROW ----
+
+// ---- WEBSOCKET INJECTION ----
+app.use((req, res, next) => {
+    req.io = io;
+    next();
+});
+
 app.use('/api/escrow', require('./src/routes/escrowRoutes'));
 
 // ---- HEALTH CHECK ----
@@ -64,7 +71,28 @@ app.get('/health', (req, res) => {
 // ---- WEBSOCKET ----
 io.on('connection', (socket) => {
     logger.info(`🔌 Client connesso: ${socket.id}`);
-    socket.on('disconnect', () => { logger.info(`🔌 Client disconnesso: ${socket.id}`); });
+
+    // Subscribe to real-time updates for a specific escrowId room
+    socket.on('subscribe:escrow', (escrowId) => {
+        if (escrowId) {
+            socket.join(`escrow:${escrowId}`);
+            logger.info(`🔌 Client ${socket.id} iscritto a stanza escrow:${escrowId}`);
+            socket.emit('subscribed', { escrowId, status: 'ok' });
+        }
+    });
+
+    // Unsubscribe from escrow room
+    socket.on('unsubscribe:escrow', (escrowId) => {
+        if (escrowId) {
+            socket.leave(`escrow:${escrowId}`);
+            logger.info(`🔌 Client ${socket.id} disiscritto da stanza escrow:${escrowId}`);
+            socket.emit('unsubscribed', { escrowId, status: 'ok' });
+        }
+    });
+
+    socket.on('disconnect', () => {
+        logger.info(`🔌 Client disconnesso: ${socket.id}`);
+    });
 });
 
 // ---- AVVIO ----
