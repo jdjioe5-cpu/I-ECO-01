@@ -5,9 +5,12 @@ Procedura passo-passo per il rilascio, installazione e configurazione su server 
 ---
 
 ## 1. Prerequisiti di Sistema
+Il progetto richiede rigorosamente Node.js 24.x come dichiarato in `package.json` (`engines.node: "24.x"`).
+
 ```bash
 sudo apt-get update && sudo apt-get install -y curl git ufw fail2ban
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+# Installazione Node.js 24.x LTS
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt-get install -y nodejs
 sudo npm install -g pm2
 ```
@@ -24,7 +27,7 @@ nano .env
 ## 3. Avvio Servizi con PM2
 ```bash
 pm2 start server.js --name "ieco-core" --watch
-pm2 start scripts/monitor/server_monitor.js --name "ieco-monitor"
+pm2 start scripts/monitor/server_monitor.js --name "ieco-monitor" -- --loop
 pm2 save
 pm2 startup
 ```
