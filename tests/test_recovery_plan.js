@@ -1,76 +1,100 @@
 const assert = require('assert');
-const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
-const DisasterRecoveryTool = require('../scripts/recovery/disaster_recovery');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const { DisasterRecoveryTool } = require('../scripts/recovery/disaster_recovery');
 
-function computeHash(buffer) {
-    return crypto.createHash('sha256').update(buffer).digest('hex');
-}
+async function runTestSuite() {
+    console.log('🧪 Starting Disaster Recovery Comprehensive Suite (solves #236)...');
 
-async function testDisasterRecovery() {
-    console.log('🧪 Starting Disaster Recovery Validation Tests...');
+    const testRootDir = path.join(__dirname, '.dr_test_sandbox_' + Date.now());
+    const testBackupDir = path.join(testRootDir, 'backups');
+    const testDataDir = path.join(testRootDir, 'data');
+    fs.mkdirSync(testBackupDir, { recursive: true });
+    fs.mkdirSync(testDataDir, { recursive: true });
 
-    const testBackupDir = path.join(__dirname, 'temp_rec_backups');
-    const testBaseDir = path.join(__dirname, 'temp_rec_data');
+    // Setup live data
+    const liveDbPath = path.join(testDataDir, 'users.json');
+    fs.writeFileSync(liveDbPath, JSON.stringify({ count: 10, state: 'corrupted' }), 'utf-8');
 
-    // 1. Setup mock source files
-    fs.mkdirSync(path.join(testBackupDir, 'backup-disaster-safe/data'), { recursive: true });
-    fs.mkdirSync(path.join(testBackupDir, 'backup-disaster-safe/gateway'), { recursive: true });
-    fs.mkdirSync(path.join(testBaseDir, 'data'), { recursive: true });
-    fs.mkdirSync(path.join(testBaseDir, 'gateway'), { recursive: true });
+    // Create a real snapshot backup-2026-09-04-001
+    const snapId = 'backup-2026-09-04-001';
+    const snapDir = path.join(testBackupDir, snapId);
+    fs.mkdirSync(path.join(snapDir, 'data'), { recursive: true });
 
-    const userContent = Buffer.from(JSON.stringify({ users: ['pytho', 'admin'] }));
-    const plantContent = Buffer.from(JSON.stringify({ plants: ['rosmarino'] }));
+    const validContent = JSON.stringify({ count: 50, state: 'healthy' });
+    fs.writeFileSync(path.join(snapDir, 'data/users.json'), validContent, 'utf-8');
 
-    fs.writeFileSync(path.join(testBackupDir, 'backup-disaster-safe/data/users.json'), userContent);
-    fs.writeFileSync(path.join(testBackupDir, 'backup-disaster-safe/gateway/plants.json'), plantContent);
+    const crypto = require('crypto');
+    const validHash = crypto.createHash('sha256').update(validContent).digest('hex');
 
     const manifest = {
-        backupId: 'backup-disaster-safe',
-        createdAt: new Date().toISOString(),
+        backup_id: snapId,
+        created_at: new Date().toISOString(),
         files: [
-            { path: 'data/users.json', sizeBytes: userContent.length, sha256: computeHash(userContent) },
-            { path: 'gateway/plants.json', sizeBytes: plantContent.length, sha256: computeHash(plantContent) }
-        ],
-        status: 'SUCCESS'
+            { path: 'data/users.json', sha256: validHash, status: 'BACKED_UP' }
+        ]
     };
-    fs.writeFileSync(path.join(testBackupDir, 'backup-disaster-safe/manifest.json'), JSON.stringify(manifest, null, 2));
-    console.log('  ✅ 1. Safe snapshot created with manifest and SHA-256 signatures');
+    fs.writeFileSync(path.join(snapDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
 
-    // 2. Simulate Disaster / Corrupted files in baseDir
-    fs.writeFileSync(path.join(testBaseDir, 'data/users.json'), 'CORRUPTED_DISASTER_STATE');
-    console.log('  ✅ 2. Disaster scenario simulated (corrupted users, missing plants)');
-
-    // 3. Run Disaster Recovery Tool
-    const recoveryTool = new DisasterRecoveryTool({
+    const tool = new DisasterRecoveryTool({
         backupDir: testBackupDir,
-        baseDir: testBaseDir
+        baseDir: testRootDir
     });
 
-    const backups = recoveryTool.listBackups();
-    assert(backups.includes('backup-disaster-safe'), 'Backup should be listed');
+    // 1. Test listBackups & latest resolution
+    const list = tool.listBackups();
+    assert.strictEqual(list.length, 1);
+    assert.strictEqual(tool.resolveBackupId('latest'), snapId);
+    console.log('  ✅ 1. Backup Listing & Latest Resolution: Verified correctly');
 
-    const result = recoveryTool.restoreSnapshot('backup-disaster-safe');
-    assert.strictEqual(result.status, 'RESTORE_SUCCESS');
-    assert.strictEqual(result.restoredFiles.length, 2);
-    console.log('  ✅ 3. Disaster recovery successfully executed atomic restore');
+    // 2. Test Atomic Restore with "latest"
+    const res = tool.restoreSnapshot('latest');
+    assert.strictEqual(res.status, 'RESTORE_SUCCESS');
+    assert.strictEqual(res.backup_id, snapId);
 
-    // 4. Verify restored content matches original
-    const restoredUsers = JSON.parse(fs.readFileSync(path.join(testBaseDir, 'data/users.json'), 'utf-8'));
-    const restoredPlants = JSON.parse(fs.readFileSync(path.join(testBaseDir, 'gateway/plants.json'), 'utf-8'));
-    assert.strictEqual(restoredUsers.users[0], 'pytho');
-    assert.strictEqual(restoredPlants.plants[0], 'rosmarino');
-    console.log('  ✅ 4. Restored database verified with 100% integrity');
+    const restoredData = JSON.parse(fs.readFileSync(liveDbPath, 'utf-8'));
+    assert.strictEqual(restoredData.state, 'healthy');
+    console.log('  ✅ 2. Atomic Restore via Latest: Successfully restored live state');
 
-    // Cleanup
-    fs.rmSync(testBackupDir, { recursive: true, force: true });
-    fs.rmSync(testBaseDir, { recursive: true, force: true });
+    // 3. Negative Test: Path Traversal Attack Defense
+    let caughtTraversal = false;
+    try {
+        tool.restoreSnapshot('../../../etc/passwd');
+    } catch (e) {
+        if (e.message.includes('Path traversal')) caughtTraversal = true;
+    }
+    assert.strictEqual(caughtTraversal, true, 'Must reject path traversal');
+    console.log('  ✅ 3. Negative Test: Path traversal attack correctly blocked');
 
-    console.log('🎉 All Disaster Recovery Plan tests passed with 100% success!');
+    // 4. Negative Test: Corrupted Checksum Rejection & Rollback
+    const snapCorruptId = 'backup-2026-09-04-002';
+    const snapCorruptDir = path.join(testBackupDir, snapCorruptId);
+    fs.mkdirSync(path.join(snapCorruptDir, 'data'), { recursive: true });
+    fs.writeFileSync(path.join(snapCorruptDir, 'data/users.json'), 'tampered_content', 'utf-8');
+    fs.writeFileSync(path.join(snapCorruptDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+
+    let caughtCorruption = false;
+    try {
+        tool.restoreSnapshot(snapCorruptId);
+    } catch (e) {
+        if (e.message.includes('Corruzione rilevata')) caughtCorruption = true;
+    }
+    assert.strictEqual(caughtCorruption, true, 'Must reject corrupted snapshot');
+    console.log('  ✅ 4. Negative Test: Checksum mismatch correctly detected and rejected');
+
+    // 5. End-to-End CLI Invocation Test
+    const cliScript = path.join(__dirname, '../scripts/recovery/disaster_recovery.js');
+    const cliOutput = execFileSync(process.execPath, [cliScript, '--list'], { encoding: 'utf-8' });
+    assert(cliOutput.includes('Available backups:'));
+    console.log('  ✅ 5. E2E CLI Execution: Verified --list CLI execution');
+
+    // Clean test sandbox
+    fs.rmSync(testRootDir, { recursive: true, force: true });
+    console.log('🎉 All Disaster Recovery tests passed 100% with full Definition-of-Done!');
 }
 
-testDisasterRecovery().catch(err => {
-    console.error('❌ Recovery test failed:', err);
+runTestSuite().catch(err => {
+    console.error('❌ DR Test failed:', err);
     process.exit(1);
 });
